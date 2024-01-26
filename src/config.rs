@@ -5,6 +5,8 @@
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::{fmt::Display, fs::File, str::FromStr, time::Duration};
+use std::fmt::Debug;
+use std::fs::OpenOptions;
 
 use crate::{sys::conf_dirs as cdirs, Error, Error::Config as ConfErr};
 
@@ -48,7 +50,7 @@ impl Config {
         let paths: Vec<_> = cdirs().iter().map(|d| PathBuf::from(d).join("config.ini")).collect();
 
         for path in paths.iter().filter(|p| p.is_file()).rev() {
-            process_ini_file(path, &mut |key, value| {
+            process_ini_file(path.as_path(), &mut |key, value| {
                 match key {
                     "tab_stop" => match parse_value(value)? {
                         0 => return Err("tab_stop must be > 0".into()),
@@ -72,20 +74,53 @@ impl Config {
 ///
 /// The `kv_fn` function will be called for each key-value pair in the file. Typically, this
 /// function will update a configuration instance.
-pub fn process_ini_file<F>(path: &Path, kv_fn: &mut F) -> Result<(), Error>
+pub fn process_ini_file<F>(path: impl ToReader, kv_fn: &mut F) -> Result<(), Error>
 where F: FnMut(&str, &str) -> Result<(), String> {
-    let file = File::open(path).map_err(|e| ConfErr(path.into(), 0, e.to_string()))?;
-    for (i, line) in BufReader::new(file).lines().enumerate() {
+    let reader = path.open_reader()?;
+    for (i, line) in reader.lines().enumerate() {
         let (i, line) = (i + 1, line?);
         let mut parts = line.trim_start().splitn(2, '=');
         match (parts.next(), parts.next()) {
             (Some(comment_line), _) if comment_line.starts_with(&['#', ';'][..]) => (),
-            (Some(k), Some(v)) => kv_fn(k.trim_end(), v).map_err(|r| ConfErr(path.into(), i, r))?,
+            (Some(k), Some(v)) => kv_fn(k.trim_end(), v).map_err(|r| ConfErr(path.path_buf(), i, r))?,
             (Some(""), None) | (None, _) => (), // Empty line
-            (Some(_), None) => return Err(ConfErr(path.into(), i, String::from("No '='"))),
+            (Some(_), None) => return Err(ConfErr(path.path_buf(), i, String::from("No '='"))),
         }
     }
     Ok(())
+}
+
+pub trait ToReader {
+    type Reader: BufRead;
+    fn path(&self) -> Option<&Path>;
+    fn path_buf(&self) -> Option<PathBuf> {
+        self.path().map(|p| p.to_path_buf())
+    }
+    fn open_reader(&self) -> Result<Self::Reader, Error>;
+}
+
+impl ToReader for &Path {
+    type Reader = BufReader<File>;
+    fn path(&self) -> Option<&Path> {
+        Some(self)
+    }
+    fn open_reader(&self) -> Result<Self::Reader, Error> {
+        let file = OpenOptions::new()
+            .read(true)
+            .open(self)
+            .map_err(|e| ConfErr(Some(self.to_path_buf()), 0, format!("{e:?}")))?;
+        Ok(BufReader::new(file))
+    }
+}
+
+impl<'a> ToReader for &'a [u8] {
+    type Reader = &'a [u8];
+    fn path(&self) -> Option<&Path> {
+        None
+    }
+    fn open_reader(&self) -> Result<Self::Reader, Error> {
+        Ok(self)
+    }
 }
 
 /// Trim a value (right-hand side of a key=value INI line) and parses it.
@@ -115,7 +150,7 @@ mod tests {
         let tmp_dir = TempDir::new().expect("Could not create temporary directory");
         let file_path = tmp_dir.path().join("test_config.ini");
         fs::write(&file_path, ini_content).expect("Could not write INI file");
-        process_ini_file(&file_path, kv_fn)
+        process_ini_file(file_path.as_path(), kv_fn)
     }
 
     #[test]
@@ -187,9 +222,9 @@ mod tests {
         let kv_fn = &mut |_: &str, _: &str| Ok(());
         let tmp_dir = TempDir::new().expect("Could not create temporary directory");
         let tmp_path = tmp_dir.path().join("path_does_not_exist.ini");
-        match process_ini_file(&tmp_path, kv_fn) {
+        match process_ini_file(tmp_path.as_path(), kv_fn) {
             Ok(()) => panic!("process_ini_file should return an error"),
-            Err(Error::Config(path, 0, _)) if path == tmp_path => (),
+            Err(Error::Config(path, 0, _)) if path == Some(tmp_path) => (),
             Err(e) => panic!("Unexpected error {:?}", e),
         }
     }

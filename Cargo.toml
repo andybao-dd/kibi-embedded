@@ -12,8 +12,14 @@ keywords = ["editor", "terminal", "text-editor"]
 categories = ["text-editors", "development-tools"]
 include = ["src/**/*", "Cargo.toml", "LICENSE*", "COPYRIGHT"]
 
+[features]
+embedded-syntax = []
+
 [dependencies]
 unicode-width = "0.1.11"
+
+[build-dependencies]
+pathdiff = { version = "0.2.1" }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2.152"

@@ -1,7 +1,7 @@
 use std::fmt::{self, Display, Formatter};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-use crate::config::{self, parse_value as pv, parse_values as pvs};
+use crate::config::{self, parse_value as pv, parse_values as pvs, ToReader};
 use crate::{sys, Error};
 
 /// Type of syntax highlighting for a single rendered character.
@@ -55,7 +55,7 @@ impl Conf {
             match PathBuf::from(conf_dir).join("syntax.d").read_dir() {
                 Ok(dir_entries) =>
                     for dir_entry in dir_entries {
-                        let (sc, extensions) = Self::from_file(&dir_entry?.path())?;
+                        let (sc, extensions) = Self::from_file(dir_entry?.path().as_path())?;
                         if extensions.into_iter().any(|e| e == ext) {
                             return Ok(Some(sc));
                         };
@@ -64,10 +64,18 @@ impl Conf {
                 Err(e) => return Err(e.into()),
             }
         }
+        #[cfg(feature = "embedded-syntax")]
+        for embedded_syntax in embedded::SYNTAX_FILES {
+            let (sc, extensions) = Self::from_file(*embedded_syntax)?;
+            if extensions.into_iter().any(|e| e == ext) {
+                return Ok(Some(sc));
+            };
+        }
+
         Ok(None)
     }
     /// Load a `SyntaxConf` from file.
-    pub fn from_file(path: &Path) -> Result<(Self, Vec<String>), Error> {
+    pub fn from_file(path: impl ToReader) -> Result<(Self, Vec<String>), Error> {
         let (mut sc, mut extensions) = (Self::default(), Vec::new());
         config::process_ini_file(path, &mut |key, val| {
             match key {
@@ -107,7 +115,7 @@ mod tests {
         let mut file_count = 0;
         let mut syntax_names = HashSet::new();
         for path in fs::read_dir("./syntax.d").unwrap() {
-            let (conf, extensions) = Conf::from_file(&path.unwrap().path()).unwrap();
+            let (conf, extensions) = Conf::from_file(path.unwrap().path().as_path()).unwrap();
             assert!(!extensions.is_empty());
             syntax_names.insert(conf.name);
             file_count += 1;
@@ -120,10 +128,15 @@ mod tests {
     fn conf_from_invalid_path() {
         let tmp_dir = TempDir::new().expect("Could not create temporary directory");
         let tmp_path = tmp_dir.path().join("path_does_not_exist.ini");
-        match Conf::from_file(&tmp_path) {
+        match Conf::from_file(tmp_path.as_path()) {
             Ok(_) => panic!("Conf::from_file should return an error"),
-            Err(Error::Config(path, 0, _)) if path == tmp_path => (),
+            Err(Error::Config(path, 0, _)) if path == Some(tmp_path) => (),
             Err(e) => panic!("Unexpected error {:?}", e),
         }
     }
+}
+
+#[cfg(feature = "embedded-syntax")]
+mod embedded {
+    include!(concat!(env!("OUT_DIR"), "/embedded_syntax.rs"));
 }
